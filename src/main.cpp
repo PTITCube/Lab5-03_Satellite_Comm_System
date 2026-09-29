@@ -1,84 +1,121 @@
 /**
- * VÍ DỤ 9: MÔ PHỎNG TRẠM MẶT ĐẤT (GROUND STATION)
+ * VÍ DỤ TỔNG HỢP: HỆ THỐNG GIAO TIẾP VỆ TINH FULL DUPLEX (COMMAND & TELEMETRY)
  * 
- * Mô tả:
- * Đoạn code này dành cho board ESP32 đóng vai trò là Trạm Mặt Đất (Receiver).
- * Nhiệm vụ:
- * 1. Lắng nghe liên tục từ module LoRa.
- * 2. Khi nhận được JSON Telemetry từ Vệ Tinh, dùng ArduinoJson để dịch và hiển thị đẹp.
- * 3. Cho phép gõ lệnh từ Serial Monitor (như 'pause', 'ping', 'ls') để gửi lên vệ tinh.
+ * Lưu ý: Trạm mặt đất (Ground Station) sử dụng mạch USB-TTL nối trực tiếp với module LoRa,
+ * do đó đoạn code này được nạp vào Vệ Tinh (OBC ESP32).
+ * 
+ * Nhiệm vụ của Vệ tinh:
+ * 1. Lắng nghe liên tục lệnh (Command) từ Trạm mặt đất qua LoRa.
+ * 2. Thực thi lệnh tương ứng (Đo pin, đọc cảm biến, chụp ảnh...).
+ * 3. Đóng gói dữ liệu và phản hồi lại Trạm mặt đất qua LoRa.
  */
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <PTITCube.h>
 
-// Khởi tạo LoRa cho trạm mặt đất
+// Khởi tạo các phân hệ
 PTIT_COM lora;
+PTIT_EPS eps;
+PTIT_Sensor sensor;
+PTIT_GPS gps;
+
+#define LED_PIN 2
 
 void setup() {
     Serial.begin(115200);
     while (!Serial) { delay(10); }
 
     Serial.println("\n==========================================");
-    Serial.println("   TRẠM MẶT ĐẤT (GROUND STATION) SẴN SÀNG");
+    Serial.println("  VỆ TINH (SATELLITE) ĐANG KHỞI ĐỘNG...");
     Serial.println("==========================================");
-    Serial.println("Đang kết nối LoRa...");
     
-    lora.init();
-    lora.setChannel(23);           // Kênh 23, phải khớp với vệ tinh
-    lora.setTransmissionMode(0);   // Chế độ Transparent
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
 
-    Serial.println("Bạn có thể gõ lệnh (ping, status, pause, resume...) và nhấn Enter để gửi.");
+    // Khởi tạo các module
+    Serial.println("[INIT] Đang khởi tạo LoRa...");
+    lora.init();
+    
+    Serial.println("[INIT] Đang khởi tạo Cảm biến và Nguồn...");
+    eps.init();
+    sensor.init(); 
+    gps.init();
+
+    Serial.println("==========================================");
+    Serial.println("VỆ TINH SẴN SÀNG NHẬN LỆNH TỪ TRẠM MẶT ĐẤT");
 }
 
 void loop() {
-    // 1. NGHE DỮ LIỆU TỪ VỆ TINH
-    String incoming = lora.update();
-    if (incoming.length() > 0) {
-        incoming.trim();
+    // Luôn cập nhật cảm biến và GPS để có dữ liệu mới nhất
+    sensor.update();
+    gps.update();
 
-        // Xử lý chuỗi JSON
-        if (incoming.startsWith("{") && incoming.endsWith("}")) {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, incoming);
-            
-            if (!error) {
-                // Phân loại JSON dựa trên các key
-                if (doc.containsKey("battery_v")) {
-                    float bat = doc["battery_v"];
-                    Serial.printf("[TELEMETRY] 🔋 Pin vệ tinh: %.2f V\n", bat);
-                }
-                else if (doc.containsKey("temp")) {
-                    float t = doc["temp"];
-                    float p = doc["pressure"];
-                    Serial.printf("[TELEMETRY] 🌤️ Môi trường: %.2f °C | Áp suất: %.1f hPa\n", t, p);
-                }
-                else if (doc.containsKey("lat")) {
-                    float lat = doc["lat"];
-                    float lng = doc["lng"];
-                    Serial.printf("[TELEMETRY] 🌍 Tọa độ GPS: %f, %f\n", lat, lng);
-                }
-                else {
-                    Serial.println("[TELEMETRY] Dữ liệu Cảm biến IMU/MAG: " + incoming);
-                }
-            } else {
-                Serial.println("[LORA] JSON Lỗi: " + incoming);
-            }
+    // Lắng nghe lệnh từ mặt đất qua sóng LoRa
+    String incomingCmd = lora.update();
+    
+    if (incomingCmd.length() > 0) {
+        incomingCmd.trim();
+        incomingCmd.toLowerCase(); // Chuẩn hóa chữ thường
+        
+        Serial.println("\n[RX] Nhận được lệnh từ mặt đất: " + incomingCmd);
+
+        // --- XỬ LÝ CÁC LỆNH (COMMANDS) ---
+        
+        if (incomingCmd == "ping") {
+            lora.sendMessage("pong - Vệ tinh đang hoạt động tốt!");
         } 
-        // Xử lý chuỗi văn bản thuần (vd: phản hồi lệnh ls, pwd, ping)
+        else if (incomingCmd == "battery" || incomingCmd == "bat") {
+            float v = eps.getBatteryVoltage();
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "Điện áp Pin vệ tinh: %.2f V", v);
+            lora.sendMessage(String(buffer));
+        }
+        else if (incomingCmd == "sensor" || incomingCmd == "env") {
+            float t = sensor.getTemperature();
+            float p = sensor.getPressure();
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "Nhiệt độ: %.2f C | Áp suất: %.1f hPa", t, p);
+            lora.sendMessage(String(buffer));
+        }
+        else if (incomingCmd == "imu") {
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "Gia tốc (X:%.1f Y:%.1f Z:%.1f) | Gyro (X:%.1f Y:%.1f Z:%.1f)", 
+                     sensor.getAccX(), sensor.getAccY(), sensor.getAccZ(),
+                     sensor.getGyroX(), sensor.getGyroY(), sensor.getGyroZ());
+            lora.sendMessage(String(buffer));
+        }
+        else if (incomingCmd == "gps") {
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "GPS: Lat %f, Lng %f", gps.getLat(), gps.getLng());
+            lora.sendMessage(String(buffer));
+        }
+        else if (incomingCmd == "led on") {
+            digitalWrite(LED_PIN, HIGH);
+            lora.sendMessage("Đã bật LED trên OBC.");
+        }
+        else if (incomingCmd == "led off") {
+            digitalWrite(LED_PIN, LOW);
+            lora.sendMessage("Đã tắt LED trên OBC.");
+        }
+        else if (incomingCmd == "telemetry") {
+            // Gửi một gói JSON chứa toàn bộ trạng thái
+            JsonDocument doc;
+            doc["battery_v"] = eps.getBatteryVoltage();
+            doc["temp"] = sensor.getTemperature();
+            doc["pressure"] = sensor.getPressure();
+            doc["lat"] = gps.getLat();
+            doc["lng"] = gps.getLng();
+            
+            String jsonOutput;
+            serializeJson(doc, jsonOutput);
+            lora.sendMessage(jsonOutput);
+        }
         else {
-            Serial.println("\n[SATELLITE REPLY] ➔ " + incoming);
+            lora.sendMessage("Lỗi: Lệnh [" + incomingCmd + "] không hợp lệ! Các lệnh hỗ trợ: ping, battery, sensor, imu, gps, led on/off, telemetry.");
         }
     }
 
-    // 2. GỬI LỆNH LÊN VỆ TINH
-    if (Serial.available()) {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
-        if (cmd.length() > 0) {
-            Serial.println("\n[TX] Đang phát lệnh: " + cmd);
-            lora.sendMessage(cmd);
-        }
-    }
+    // Tuỳ chọn: Có thể cấu hình vệ tinh tự động bắn Telemetry mỗi 5 giây mà không cần lệnh
+    // Bằng cách sử dụng millis() ở đây.
 }
